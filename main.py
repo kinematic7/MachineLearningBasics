@@ -240,51 +240,22 @@ if __name__ == "__main__":
             f"Use ONLY the retrieved info below to answer the question.\n\n"
             f"Retrieved info: {retrieved_answer}\n"
             f"Question: {question}\n"
-            f"Answer clearly and concisely:"
+            f"Answer clearly and concisely:\n"
         )
 
-        output = generator(prompt, max_new_tokens=150, do_sample=False)
-        generated_text = output[0].get("generated_text", "")
-        # Split by line breaks, strip whitespace, remove empty lines and duplicates while preserving order
-        lines = [line.strip() for line in generated_text.splitlines() if line.strip()]
-        seen = set()
-        unique_lines = []
-        for line in lines:
-            if line not in seen:
-                unique_lines.append(line)
-                seen.add(line)
-        generated_text = "\n".join(unique_lines)
-        start_marker = "Answer clearly and concisely:"
-        idx = generated_text.find(start_marker)
-        if idx != -1:
-            # take text after the marker, then keep up to the first period
-            tail = generated_text[idx + len(start_marker):].lstrip()
-            dot_idx = tail.find(".")
-            if dot_idx != -1:
-                first_sentence = tail[:dot_idx + 1].strip()
-            else:
-                first_sentence = tail.strip()
-                generated_text = f"{start_marker} {first_sentence}"
-        else:
-            # fallback: return up to the first period of the whole generated text
-            dot_idx = generated_text.find(".")
-            if dot_idx != -1:
-                generated_text = generated_text[:dot_idx + 1].strip()
-            else:
-                generated_text = generated_text.strip()
+        output = generator(
+            prompt,
+            max_new_tokens=50,
+            do_sample=False
+        )
 
-        # Remove the last line if it is "Answer clearly and concisely: 1"
-        if generated_text.endswith("Answer clearly and concisely: 1"):
-            generated_text = generated_text[:generated_text.rfind("Answer clearly and concisely: 1")].strip()
+        # full LLM text includes prompt + answer
+        full_output = output[0]["generated_text"]
 
+        # extract only the answer
+        answer = full_output.replace(prompt, "").strip()
 
-        # Cut at the first period
-        # if "." in generated_text:
-        #     parts = generated_text.split(".")
-        #     generated_text = parts[-2].strip() + "." if len(parts) > 1 else generated_text
-
-        return generated_text
-
+        return answer
 
     #==========================================================
     # Chatbot Loop
