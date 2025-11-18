@@ -1,12 +1,25 @@
+# -----------------------------------------------
+# Login to Hugging Face Hub
+# -----------------------------------------------
+from huggingface_hub import login
+# Authenticate to access gated models if needed
+# NOTE: Do not hardcode tokens in source code; set HF_TOKEN in the environment instead.
+# The actual login will be attempted later (after imports) if HF_TOKEN is present.
+
+# ------------------------------------------------
+# Imports
+# ------------------------------------------------
 import os
 import pandas as pd
 import numpy as np
 from sklearn.ensemble import RandomForestRegressor
 import chromadb
 from chromadb.config import Settings
-from ollama import embeddings, chat
+from sentence_transformers import SentenceTransformer
+from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
 import hashlib
 import json
+import torch
 
 #==============================================================
 # Utility: SHA256 hash (for stable unique document IDs)
@@ -18,7 +31,7 @@ def get_hash_id(text):
 # Population Data Loader
 #==============================================================
 class PopulationDataLoader:
-    UNWANTED_COLUMNS = ["rank", "cca3", "area (km²)", "density (km²)", 
+    UNWANTED_COLUMNS = ["rank", "cca3", "area (km²)", "density (km²)",
                         "world percentage", "growth rate"]
     REQUIRED = ["country", "continent", "2023 population"]
 
@@ -62,7 +75,8 @@ class PopulationPredictor:
             y = country_df["population"].values
 
             model = RandomForestRegressor(
-                n_estimators=self.n_estimators, random_state=42
+                n_estimators=self.n_estimators,
+                random_state=42
             )
             model.fit(X, y)
 
@@ -78,11 +92,12 @@ class PopulationPredictor:
             return None
 
         info = self.models[country]
-        model, continent, known_years = info["model"], info["continent"], info["known_years"]
+        model = info["model"]
+        continent = info["continent"]
+        known_years = info["known_years"]
 
-        # If we already have actual data for this year
         if year in known_years:
-            row = self.df[(self.df['country'] == country) & (self.df['year'] == year)].iloc[0]
+            row = self.df[(self.df["country"] == country) & (self.df["year"] == year)].iloc[0]
             return {
                 "country": country,
                 "continent": continent,
@@ -90,7 +105,6 @@ class PopulationPredictor:
                 "population": row["population"]
             }
 
-        # Predict new year
         pred = int(model.predict(np.array([[year]]))[0])
         return {
             "country": country,
@@ -104,15 +118,17 @@ class PopulationPredictor:
 #==============================================================
 if __name__ == "__main__":
 
+    # ----------------------------
     # Load population data
+    # ----------------------------
     loader = PopulationDataLoader("world_population_data.csv")
     df = loader.load_dataframe()
     long_df = loader.melt_years(df)
 
+    # ----------------------------
     # Train predictor
+    # ----------------------------
     predictor = PopulationPredictor(long_df)
-
-    # Predict 2026 only (expand if needed)
     years_to_predict = [2026]
     countries = long_df["country"].unique()
     predictions = []
@@ -125,92 +141,150 @@ if __name__ == "__main__":
 
     pred_df = pd.DataFrame(predictions)
 
-    #==========================================================
+    # ----------------------------
     # Convert predictions → Q/A pairs
-    #==========================================================
+    # ----------------------------
     qa_pairs = []
     for _, row in pred_df.iterrows():
         q = f"What is the population of {row['country']} in {row['year']}?"
-        a = f"The population of {row['country']} in {row['year']} is {row['population']}."
+        a = f"{row['country']} has a population of approximately {row['population']} in {row['year']}."
         qa_pairs.append({"question": q, "answer": a})
 
-    # Save as JSON if needed
     with open("population_qa.json", "w") as f:
         json.dump(qa_pairs, f, indent=4)
 
     print(f"Created {len(qa_pairs)} Q/A pairs.")
 
-    #==========================================================
+    # ----------------------------
     # Initialize Chroma DB
-    #==========================================================
+    # ----------------------------
     chroma_folder = os.path.join(os.getcwd(), "chroma_db")
     os.makedirs(chroma_folder, exist_ok=True)
 
     client_db = chromadb.Client(
         Settings(persist_directory=chroma_folder, anonymized_telemetry=False)
     )
-
     collection = client_db.get_or_create_collection("PopulationQA")
 
-    #==========================================================
-    # Insert Q/A pairs into Chroma
-    #==========================================================
+    # ----------------------------
+    # Initialize embedding model
+    # ----------------------------
+    embed_model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
+
+    # ----------------------------
+    # Insert Q/A pairs into Chroma using embeddings
+    # ----------------------------
     for pair in qa_pairs:
         doc_id = get_hash_id(pair["question"])
-
-        existing = collection.get(ids=[doc_id])
-        if existing["ids"]:
-            continue
-
-        emb = embeddings("llama3:latest", pair["question"])["embedding"]
-
-        collection.add(
-            ids=[doc_id],
-            documents=[pair["answer"]],
-            metadatas=[pair],
-            embeddings=[emb]
-        )
+        if not collection.get(ids=[doc_id])["ids"]:
+            emb = embed_model.encode(pair["question"]).tolist()
+            collection.add(
+                ids=[doc_id],
+                documents=[pair["answer"]],
+                metadatas=[pair],
+                embeddings=[emb]
+            )
 
     print("Saved Q/A pairs into Chroma DB at ./chroma_db")
 
-    #==========================================================
-    # Ask Question Function
-    #==========================================================
-    def ask_question(question, top_k=50):
-        query_embedding = embeddings("llama3:latest", question)["embedding"]
+    # ----------------------------
+    # Load Hugging Face LLM (Gemma)
+    # ----------------------------
 
-        results = collection.query(
-            query_embeddings=[query_embedding],
-            n_results=top_k
+    MODEL_NAME = "google/gemma-2b" 
+    # MODEL_NAME = "google/gemma-2-9b-it"
+
+    device = 0 if torch.cuda.is_available() else -1
+
+    # Attempt to login to Hugging Face Hub if HF_TOKEN env var is set (avoid hardcoding tokens)
+    hf_token = os.environ.get("HF_TOKEN")
+    if hf_token:
+        try:
+            login(hf_token)
+        except Exception as e:
+            print(f"Warning: failed to login to Hugging Face Hub: {e}")
+
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+        model = AutoModelForCausalLM.from_pretrained(
+            MODEL_NAME,
+            device_map="auto" if device == 0 else None,
+            torch_dtype=torch.float16 if device == 0 else None
         )
+        generator = pipeline(
+            "text-generation",
+            model=model,
+            tokenizer=tokenizer,
+            device=device,
+            max_new_tokens=200,
+            do_sample=False  # deterministic → stops repeats
+        )
+    except Exception as e:
+        print(f"Error loading model {MODEL_NAME}: {e}")
+        exit(1)
 
-        print (f"Retrieved {len(results['documents'][0])} documents from Chroma DB.")
+    #==========================================================
+    # Ask Question Function (LLM + Chroma, multi-country safe)
+    #==========================================================
+    def ask_question(question, top_k=10):
+        query_emb = embed_model.encode(question).tolist()
+        results = collection.query(query_embeddings=[query_emb], n_results=top_k)
 
         if not results["documents"]:
             return "I couldn't find any population information for that question."
 
         retrieved_answer = results["documents"][0][0]
 
-        response = chat("llama3:latest", [
-            {
-                "role": "system",
-                "content": (
-                    "You are a population data assistant. "
-                    "You must answer ONLY using the retrieved information. "
-                    "Do not invent numbers or facts."
-                )
-            },
-            {
-                "role": "user",
-                "content": (
-                    f"Retrieved info: {retrieved_answer}\n\n"
-                    f"Question: {question}\n\n"
-                    f"Answer clearly and concisely."
-                )
-            }
-        ])
+        prompt = (
+            f"You are a population data assistant.\n"
+            f"Use ONLY the retrieved info below to answer the question.\n\n"
+            f"Retrieved info: {retrieved_answer}\n"
+            f"Question: {question}\n"
+            f"Answer clearly and concisely:"
+        )
 
-        return response["message"]["content"]
+        output = generator(prompt, max_new_tokens=150, do_sample=False)
+        generated_text = output[0].get("generated_text", "")
+        # Split by line breaks, strip whitespace, remove empty lines and duplicates while preserving order
+        lines = [line.strip() for line in generated_text.splitlines() if line.strip()]
+        seen = set()
+        unique_lines = []
+        for line in lines:
+            if line not in seen:
+                unique_lines.append(line)
+                seen.add(line)
+        generated_text = "\n".join(unique_lines)
+        start_marker = "Answer clearly and concisely:"
+        idx = generated_text.find(start_marker)
+        if idx != -1:
+            # take text after the marker, then keep up to the first period
+            tail = generated_text[idx + len(start_marker):].lstrip()
+            dot_idx = tail.find(".")
+            if dot_idx != -1:
+                first_sentence = tail[:dot_idx + 1].strip()
+            else:
+                first_sentence = tail.strip()
+                generated_text = f"{start_marker} {first_sentence}"
+        else:
+            # fallback: return up to the first period of the whole generated text
+            dot_idx = generated_text.find(".")
+            if dot_idx != -1:
+                generated_text = generated_text[:dot_idx + 1].strip()
+            else:
+                generated_text = generated_text.strip()
+
+        # Remove the last line if it is "Answer clearly and concisely: 1"
+        if generated_text.endswith("Answer clearly and concisely: 1"):
+            generated_text = generated_text[:generated_text.rfind("Answer clearly and concisely: 1")].strip()
+
+
+        # Cut at the first period
+        # if "." in generated_text:
+        #     parts = generated_text.split(".")
+        #     generated_text = parts[-2].strip() + "." if len(parts) > 1 else generated_text
+
+        return generated_text
+
 
     #==========================================================
     # Chatbot Loop
@@ -222,7 +296,6 @@ if __name__ == "__main__":
         if question.lower() in ["exit", "quit"]:
             print("Goodbye!")
             break
-
         try:
             answer = ask_question(question)
             print(f"Bot: {answer}\n")
