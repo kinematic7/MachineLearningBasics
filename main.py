@@ -2,9 +2,6 @@
 # Login to Hugging Face Hub
 # -----------------------------------------------
 from huggingface_hub import login
-# Authenticate to access gated models if needed
-# NOTE: Do not hardcode tokens in source code; set HF_TOKEN in the environment instead.
-# The actual login will be attempted later (after imports) if HF_TOKEN is present.
 
 # ------------------------------------------------
 # Imports
@@ -114,6 +111,60 @@ class PopulationPredictor:
         }
 
 #==============================================================
+# Ask Question Function (LLM + Chroma)
+#==============================================================
+def ask_question(question, top_k=10):
+    # Encode query
+    query_emb = embed_model.encode(question).tolist()
+
+    # Retrieve nearest documents
+    results = collection.query(
+        query_embeddings=[query_emb],
+        n_results=top_k
+    )
+
+    if not results["documents"]:
+        return "I couldn't find any population information for that question."
+
+    retrieved_answer = results["documents"][0][0]
+
+    FINAL_MARKER = "FINAL_ANSWER:"
+
+    prompt = (
+        "You are a population data assistant.\n"
+        "Use ONLY the retrieved info below to answer the question accurately.\n\n"
+        f"Retrieved info: {retrieved_answer}\n"
+        f"Question: {question}\n"
+        f"{FINAL_MARKER}"
+    )
+
+    output = generator(prompt, max_new_tokens=150, do_sample=False)
+    generated = output[0].get("generated_text", "")
+
+    # Clean duplicates
+    lines = [line.strip() for line in generated.splitlines() if line.strip()]
+    unique = []
+    seen = set()
+    for line in lines:
+        if line not in seen:
+            unique.append(line)
+            seen.add(line)
+    generated = "\n".join(unique)
+
+    # Extract answer after FINAL_MARKER
+    idx = generated.find(FINAL_MARKER)
+    if idx != -1:
+        answer_text = generated[idx + len(FINAL_MARKER):].strip()
+    else:
+        answer_text = generated.strip()
+
+    # Keep first sentence only
+    if "." in answer_text:
+        answer_text = answer_text.split(".")[0].strip()
+
+    return answer_text
+
+#==============================================================
 # MAIN PROGRAM
 #==============================================================
 if __name__ == "__main__":
@@ -164,15 +215,17 @@ if __name__ == "__main__":
     client_db = chromadb.Client(
         Settings(persist_directory=chroma_folder, anonymized_telemetry=False)
     )
+    global collection
     collection = client_db.get_or_create_collection("PopulationQA")
 
     # ----------------------------
-    # Initialize embedding model
+    # Embedding model
     # ----------------------------
+    global embed_model
     embed_model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
 
     # ----------------------------
-    # Insert Q/A pairs into Chroma using embeddings
+    # Insert embeddings into Chroma
     # ----------------------------
     for pair in qa_pairs:
         doc_id = get_hash_id(pair["question"])
@@ -190,19 +243,16 @@ if __name__ == "__main__":
     # ----------------------------
     # Load Hugging Face LLM (Gemma)
     # ----------------------------
-
-    MODEL_NAME = "google/gemma-2b" 
-    # MODEL_NAME = "google/gemma-2-9b-it"
+    MODEL_NAME = "google/gemma-2b"
 
     device = 0 if torch.cuda.is_available() else -1
 
-    # Attempt to login to Hugging Face Hub if HF_TOKEN env var is set (avoid hardcoding tokens)
     hf_token = os.environ.get("HF_TOKEN")
     if hf_token:
         try:
             login(hf_token)
         except Exception as e:
-            print(f"Warning: failed to login to Hugging Face Hub: {e}")
+            print(f"Warning: failed to login: {e}")
 
     try:
         tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
@@ -211,74 +261,22 @@ if __name__ == "__main__":
             device_map="auto" if device == 0 else None,
             torch_dtype=torch.float16 if device == 0 else None
         )
+        global generator
         generator = pipeline(
             "text-generation",
             model=model,
             tokenizer=tokenizer,
             device=device,
             max_new_tokens=200,
-            do_sample=False  # deterministic → stops repeats
+            do_sample=False
         )
+
     except Exception as e:
         print(f"Error loading model {MODEL_NAME}: {e}")
         exit(1)
 
     #==========================================================
-    # Ask Question Function (LLM + Chroma, multi-country safe)
-    #==========================================================
-    def ask_question(question, top_k=10):
-        query_emb = embed_model.encode(question).tolist()
-        results = collection.query(query_embeddings=[query_emb], n_results=top_k)
-
-        if not results["documents"]:
-            return "I couldn't find any population information for that question."
-
-        retrieved_answer = results["documents"][0][0]
-
-        prompt = (
-            f"You are a population data assistant.\n"
-            f"Use ONLY the retrieved info below to answer the question.\n\n"
-            f"Retrieved info: {retrieved_answer}\n"
-            f"Question: {question}\n"
-            f"Answer clearly and concisely:"
-        )
-
-        output = generator(prompt, max_new_tokens=150, do_sample=False)
-        generated_text = output[0].get("generated_text", "")
-        
-        # Split by line breaks, strip whitespace, remove empty lines and duplicates
-        lines = [line.strip() for line in generated_text.splitlines() if line.strip()]
-        seen = set()
-        unique_lines = []
-        for line in lines:
-            if line not in seen:
-                unique_lines.append(line)
-                seen.add(line)
-        generated_text = "\n".join(unique_lines)
-        
-        start_marker = "Answer clearly and concisely:"
-        idx = generated_text.find(start_marker)
-        if idx != -1:
-            tail = generated_text[idx + len(start_marker):].lstrip()
-            dot_idx = tail.find(".")
-            if dot_idx != -1:
-                first_sentence = tail[:dot_idx + 1].strip()
-            else:
-                first_sentence = tail.strip()
-            generated_text = f"{start_marker} {first_sentence}"
-        else:
-            dot_idx = generated_text.find(".")
-            if dot_idx != -1:
-                generated_text = generated_text[:dot_idx + 1].strip()
-            else:
-                generated_text = generated_text.strip()
-
-        if generated_text.endswith("Answer clearly and concisely: 1"):
-            generated_text = generated_text[:generated_text.rfind("Answer clearly and concisely: 1")].strip()
-        
-        return generated_text
-    #==========================================================
-    # Chatbot Loop
+    # Chat Loop
     #==========================================================
     print("\nPopulation Q/A Chatbot. Type 'exit' to quit.\n")
 
@@ -287,6 +285,7 @@ if __name__ == "__main__":
         if question.lower() in ["exit", "quit"]:
             print("Goodbye!")
             break
+
         try:
             answer = ask_question(question)
             print(f"Bot: {answer}\n")
