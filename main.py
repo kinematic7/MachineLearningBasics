@@ -1,36 +1,33 @@
-# -----------------------------------------------
-# Login to Hugging Face Hub
-# -----------------------------------------------
-from huggingface_hub import login
+# ================================================
+# Population Q/A Chatbot
+# ================================================
 
-# ------------------------------------------------
-# Imports
-# ------------------------------------------------
 import os
 import pandas as pd
 import numpy as np
+import hashlib
+import json
+import torch
 from sklearn.ensemble import RandomForestRegressor
 import chromadb
 from chromadb.config import Settings
 from sentence_transformers import SentenceTransformer
 from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
-import hashlib
-import json
-import torch
+from huggingface_hub import login
 
-#==============================================================
-# Utility: SHA256 hash (for stable unique document IDs)
-#==============================================================
+# ==========================================================
+# Hash utility
+# ==========================================================
 def get_hash_id(text):
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
-#==============================================================
+# ==========================================================
 # Population Data Loader
-#==============================================================
+# ==========================================================
 class PopulationDataLoader:
     UNWANTED_COLUMNS = ["rank", "cca3", "area (km²)", "density (km²)",
                         "world percentage", "growth rate"]
-    REQUIRED = ["country", "continent", "2023 population"]
+    REQUIRED = ["country", "continent"]
 
     def __init__(self, file_path):
         self.file_path = file_path
@@ -55,9 +52,9 @@ class PopulationDataLoader:
         long_df = long_df.sort_values(["country", "year"]).reset_index(drop=True)
         return long_df
 
-#==============================================================
+# ==========================================================
 # Population Predictor
-#==============================================================
+# ==========================================================
 class PopulationPredictor:
     def __init__(self, df, n_estimators=300):
         self.df = df
@@ -71,10 +68,7 @@ class PopulationPredictor:
             X = country_df["year"].values.reshape(-1, 1)
             y = country_df["population"].values
 
-            model = RandomForestRegressor(
-                n_estimators=self.n_estimators,
-                random_state=42
-            )
+            model = RandomForestRegressor(n_estimators=self.n_estimators, random_state=42)
             model.fit(X, y)
 
             continent = country_df["continent"].iloc[0]
@@ -89,40 +83,33 @@ class PopulationPredictor:
             return None
 
         info = self.models[country]
-        model = info["model"]
-        continent = info["continent"]
-        known_years = info["known_years"]
 
-        if year in known_years:
+        if year in info["known_years"]:
             row = self.df[(self.df["country"] == country) & (self.df["year"] == year)].iloc[0]
             return {
                 "country": country,
-                "continent": continent,
+                "continent": info["continent"],
                 "year": year,
                 "population": row["population"]
             }
 
-        pred = int(model.predict(np.array([[year]]))[0])
+        pred = int(info["model"].predict(np.array([[year]]))[0])
         return {
             "country": country,
-            "continent": continent,
+            "continent": info["continent"],
             "year": year,
             "population": pred
         }
 
-#==============================================================
-# Ask Question Function (LLM + Chroma)
-#==============================================================
+# ==========================================================
+# Ask Question Function
+# ==========================================================
 def ask_question(question, top_k=10):
     # Encode query
     query_emb = embed_model.encode(question).tolist()
 
     # Retrieve nearest documents
-    results = collection.query(
-        query_embeddings=[query_emb],
-        n_results=top_k
-    )
-
+    results = collection.query(query_embeddings=[query_emb], n_results=top_k)
     if not results["documents"]:
         return "I couldn't find any population information for that question."
 
@@ -164,11 +151,10 @@ def ask_question(question, top_k=10):
 
     return answer_text
 
-#==============================================================
+# ==========================================================
 # MAIN PROGRAM
-#==============================================================
+# ==========================================================
 if __name__ == "__main__":
-
     # ----------------------------
     # Load population data
     # ----------------------------
@@ -181,10 +167,9 @@ if __name__ == "__main__":
     # ----------------------------
     predictor = PopulationPredictor(long_df)
     years_to_predict = [2026]
-    countries = long_df["country"].unique()
     predictions = []
 
-    for country in countries:
+    for country in long_df["country"].unique():
         for year in years_to_predict:
             pred = predictor.predict(country, year)
             if pred:
@@ -215,13 +200,11 @@ if __name__ == "__main__":
     client_db = chromadb.Client(
         Settings(persist_directory=chroma_folder, anonymized_telemetry=False)
     )
-    global collection
     collection = client_db.get_or_create_collection("PopulationQA")
 
     # ----------------------------
     # Embedding model
     # ----------------------------
-    global embed_model
     embed_model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
 
     # ----------------------------
@@ -241,11 +224,9 @@ if __name__ == "__main__":
     print("Saved Q/A pairs into Chroma DB at ./chroma_db")
 
     # ----------------------------
-    # Load Hugging Face LLM (Gemma)
+    # Load Hugging Face LLM (Gemma-2B)
     # ----------------------------
     MODEL_NAME = "google/gemma-2b"
-
-    device = 0 if torch.cuda.is_available() else -1
 
     hf_token = os.environ.get("HF_TOKEN")
     if hf_token:
@@ -258,15 +239,14 @@ if __name__ == "__main__":
         tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
         model = AutoModelForCausalLM.from_pretrained(
             MODEL_NAME,
-            device_map="auto" if device == 0 else None,
-            torch_dtype=torch.float16 if device == 0 else None
+            device_map="auto",       # Let accelerate handle GPU placement
+            torch_dtype=torch.float16
         )
-        global generator
+
         generator = pipeline(
             "text-generation",
             model=model,
             tokenizer=tokenizer,
-            device=device,
             max_new_tokens=200,
             do_sample=False
         )
