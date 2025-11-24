@@ -7,7 +7,8 @@ import ollama
 chroma_client = chromadb.Client()
 
 # Ollama model
-OLLAMA_MODEL = "llama3:latest"  # your installed model
+#OLLAMA_MODEL = "llama3:latest"  # your installed model
+OLLAMA_MODEL = "llama3.1:8b"
 
 class ChromaDBHandler:
     def __init__(self, client):
@@ -181,25 +182,31 @@ def main():
     # List all countries in Asia
     result = collection.query(
         query_texts=["List all the countries in Asia"],
-        n_results=100,
+        n_results=150,
         include=["documents", "metadatas"]
     )
     refiltercollection = db_handler.get_result_details(result)
 
     print("Countries in Asia:")
-    data_for_asia = ""
-    for countryData in refiltercollection:
-        if "Asia" in countryData:
-            print(countryData)
-            data_for_asia += countryData + "\n"
+
+    print("----------------")
+
+    #print("Length of populations from items:", countCountries)
+
+    asianCountries = [countryData for countryData in refiltercollection if "Asia" in countryData]
+    for countryData in asianCountries:
+        print(countryData)
+
+    #print("Length of populations from items:", len(asianCountries))
+
     print("----------------")
 
     # Use Ollama to calculate total population
-    total_population_line = db_handler.use_ollama_for_population(data_for_asia)
+    total_population_line = db_handler.use_ollama_for_population(asianCountries)
     print("Total population in Asia (calculated by Ollama):", total_population_line)
 
     # Calculate total population without LLM
-    total_population_no_llm = db_handler.get_population_of_countries_no_LLM(refiltercollection)
+    total_population_no_llm = db_handler.get_population_of_countries_no_LLM(asianCountries)
     print("Total population in Asia (calculated without LLM):", total_population_no_llm)
 
 if __name__ == "__main__":
