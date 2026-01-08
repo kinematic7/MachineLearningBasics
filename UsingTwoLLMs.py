@@ -1,5 +1,3 @@
-# uvicorn llama3chatbot:app --reload 
-
 import httpx
 from fastapi import FastAPI
 from pydantic import BaseModel
@@ -146,3 +144,4 @@ async def ask(req: QuestionRequest):
     )
 
     return {"answer": result["final_answer"]}
+
