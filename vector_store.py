@@ -23,14 +23,14 @@ DB_CONFIGS = {
         "host": "localhost",
         "database": "Rubaiyat",
         "user": "postgres",
-        "password": "com156sA",
+        "password": "randompassword",
         "options": "-c search_path=Rubaiyat,public"
     },
     "prod": {
         "host": "rubaiyat.chmigquya572.us-east-1.rds.amazonaws.com",
         "database": "Rubaiyat",
         "user": "mnislam",
-        "password": "com156sA",
+        "password": "randompassword",
         "options": "-c search_path=Rubaiyat,public"
     }
 }
