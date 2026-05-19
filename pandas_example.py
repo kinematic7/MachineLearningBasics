@@ -1,79 +1,85 @@
 import pandas as pd
 
-
-class Person:
-    def __init__(self, name, age):
+class Item:
+    def __init__(self, name, color, price):
         self.name = name
-        self.age = age
+        self.color = color
+        self.price = price
 
 
-class Employee(Person):
-    def __init__(self, name, age, employee_id):
-        super().__init__(name, age)
-        self.employee_id = employee_id
+class Shirt(Item):
+    def __init__(self, name, color, price, size):
+        super().__init__(name, color, price)
+        self.size = size
 
 
-class EmployeeManager:
+class Pants(Item):
+    def __init__(self, name, color, price, waist):
+        super().__init__(name, color, price)
+        self.waist = waist
+
+
+class ShoppingCart:
     def __init__(self):
-        self.employees = pd.DataFrame(
-            columns=["name", "age", "employee_id"]
-        )
+        self.items = pd.DataFrame(columns=["Item", "Quantity"])
 
-    def add_employee(self, employee):
+    def add_item(self, item, quantity):
         new_row = pd.DataFrame([{
-            "name": employee.name,
-            "age": employee.age,
-            "employee_id": employee.employee_id
+            "Item": item,
+            "Quantity": quantity
         }])
 
-        self.employees = pd.concat(
-            [self.employees, new_row],
-            ignore_index=True
-        )
+        self.items = pd.concat([self.items, new_row], ignore_index=True)
 
-    def get_employee_by_id(self, employee_id):
-        employee_data = self.employees.loc[
-            self.employees["employee_id"] == employee_id
-        ]
+    def calculate_total(self):
+        total = 0
 
-        if not employee_data.empty:
-            return employee_data.iloc[0].to_dict()
+        for index, row in self.items.iterrows():
+            item = row["Item"]
+            quantity = row["Quantity"]
 
-        return None
+            total += item.price * quantity
 
-    def get_all_employees(self):
-        return self.employees.to_dict(orient="records")
-
-    def group_employees_by_age(self):
-        age_groups = {
-            age: group.to_dict(orient="records")
-            for age, group in self.employees.groupby("age")
-        }
-
-        return age_groups
-
-    def delete_employee_by_id(self, employee_id):
-        self.employees = self.employees.loc[
-            self.employees["employee_id"] != employee_id
-        ]
+        return total
 
 
 if __name__ == "__main__":
-    manager = EmployeeManager()
 
-    emp1 = Employee("Alice", 30, "E001")
-    emp2 = Employee("Bob", 25, "E002")
-    emp3 = Employee("Charlie", 30, "E003")
+    shirt1 = Shirt("T-Shirt", "Blue", 19.99, "M")
+    shirt2 = Shirt("Dress Shirt", "White", 39.99, "L")
+    shirt3 = Shirt("Polo Shirt", "Red", 29.99, "S")
 
-    manager.add_employee(emp1)
-    manager.add_employee(emp2)
-    manager.add_employee(emp3)
+    pants1 = Pants("Jeans", "Blue", 49.99, 32)
+    pants2 = Pants("Chinos", "Khaki", 39.99, 34)
+    pants3 = Pants("Shorts", "Black", 29.99, 30)
 
-    print("All Employees:")
-    print(manager.get_all_employees())
+    cart = ShoppingCart()
 
-    print("\nEmployee By ID:")
-    print(manager.get_employee_by_id("E002"))
+    cart.add_item(shirt1, 2)
+    cart.add_item(pants1, 1)
+    cart.add_item(shirt2, 1)
+    cart.add_item(pants2, 3)
 
-    print("\nEmployees Grouped By Age:")
-    print(manager.group_employees_by_age())
+    # Display cleaner output
+    display_df = cart.items.copy()
+    display_df["Item"] = display_df["Item"].apply(lambda x: x.name)
+
+    print(display_df)
+
+    print(f"\nTotal Sales: ${cart.calculate_total():.2f}")
+
+    result_total_quantity = (
+        display_df.groupby("Item")["Quantity"]
+        .sum()
+        .reset_index()
+    )
+
+    print("\nTotal Quantity of Each Item:")
+    print(result_total_quantity)
+
+    result_sales_greater_than_one = (
+        display_df[display_df["Quantity"] > 1]
+    )
+
+    print("\nItems with Quantity Greater than 1:")
+    print(result_sales_greater_than_one)
